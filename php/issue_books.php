@@ -11,47 +11,75 @@ $due_date = date('Y-m-d', strtotime('+14 days'));
 $alert = "";
 $alert_type = "";
 
+// Ensure session values exist to avoid undefined index warnings
+if (!isset($_SESSION['role'])) {
+    $_SESSION['role'] = 'User'; // fallback
+}
+if (!isset($_SESSION['reg_no'])) {
+    $_SESSION['reg_no'] = '';
+}
+if (!isset($_SESSION['first_name'])) {
+    $_SESSION['first_name'] = '';
+}
+
 // Handle Issue Book form
 if (isset($_POST['issue'])) {
-    $reg_no = trim($_POST['reg_no']);
+    // prefer posted reg_no (admin) otherwise fallback to session reg_no
+    $reg_no = isset($_POST['reg_no']) ? trim($_POST['reg_no']) : trim($_SESSION['reg_no']);
     $book_id = trim($_POST['book_id']);
 
     if (empty($reg_no) || empty($book_id)) {
         $alert = "Please fill all required fields.";
-        $alert_type = "danger"; 
-    } 
-    else {
-        $checkBook = $connection->prepare("SELECT status FROM book_information WHERE id = ?");
-        $checkBook->bind_param("i", $book_id);
-        $checkBook->execute();
-        $result = $checkBook->get_result();
-
-        if ($result->num_rows === 0) {
-            $alert = "Book not found!";
+        $alert_type = "danger";
+    } else {
+        // Validate that book_id is integer-like
+        if (!ctype_digit($book_id)) {
+            $alert = "Book ID must be a numeric ID.";
             $alert_type = "danger";
-        } 
-        else {
-            $book = $result->fetch_assoc();
+        } else {
+            $book_id_int = (int)$book_id;
 
-            if ($book['status'] === 'issued') {
-                $alert = "😢 This book is already issued.";
-                $alert_type = "warning";
-            } 
-            else {
-                $insert = $connection->prepare("INSERT INTO issue_return (registration_no, book_id, action, issue_date, due_date) VALUES (?, ?, 'issue', ?, ?)");
-                $insert->bind_param("siss", $reg_no, $book_id, $issue_date, $due_date);
+            $checkBook = $connection->prepare("SELECT status FROM book_information WHERE id = ?");
+            if (!$checkBook) {
+                $alert = "Database error (prepare checkBook): " . $connection->error;
+                $alert_type = "danger";
+            } else {
+                $checkBook->bind_param("i", $book_id_int);
+                $checkBook->execute();
+                $result = $checkBook->get_result();
 
-                if ($insert->execute()) {
-                    $update = $connection->prepare("UPDATE book_information SET status = 'issued' WHERE id = ?");
-                    $update->bind_param("i", $book_id);
-                    $update->execute();
-
-                    $alert = "😍 Book issued successfully!";
-                    $alert_type = "success";
-                } 
-                else {
-                    $alert = "Error issuing book: " . $insert->error;
+                if ($result->num_rows === 0) {
+                    $alert = "Book not found!";
                     $alert_type = "danger";
+                } else {
+                    $book = $result->fetch_assoc();
+
+                    if ($book['status'] === 'issued') {
+                        $alert = "😢 This book is already issued.";
+                        $alert_type = "warning";
+                    } else {
+                        $insert = $connection->prepare("INSERT INTO issue_return (registration_no, book_id, action, issue_date, due_date) VALUES (?, ?, 'issue', ?, ?)");
+                        if (!$insert) {
+                            $alert = "Database error (prepare insert): " . $connection->error;
+                            $alert_type = "danger";
+                        } else {
+                            // registration_no is string, book_id int, issue_date string, due_date string => "siss"
+                            $insert->bind_param("siss", $reg_no, $book_id_int, $issue_date, $due_date);
+
+                            if ($insert->execute()) {
+                                $update = $connection->prepare("UPDATE book_information SET status = 'issued' WHERE id = ?");
+                                if ($update) {
+                                    $update->bind_param("i", $book_id_int);
+                                    $update->execute();
+                                }
+                                $alert = "😍 Book issued successfully!";
+                                $alert_type = "success";
+                            } else {
+                                $alert = "Error issuing book: " . $insert->error;
+                                $alert_type = "danger";
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -101,7 +129,7 @@ if (isset($_POST['issue'])) {
     <!-- ===== ALERT BOX ===== -->
     <?php if (!empty($alert)) { ?>
       <div class="alert alert-<?= $alert_type ?> alert-dismissible fade show mt-2" role="alert">
-        <?= $alert ?>
+        <?= htmlspecialchars($alert) ?>
         <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
       </div>
     <?php } ?>
@@ -113,15 +141,72 @@ if (isset($_POST['issue'])) {
         <form action="" method="post">
           <h2>Issue Book Form</h2>
 
+          <!-- Updated Registration No Section -->
           <div class="input_box">
             <label>Registration No</label>
-            <input type="text" name="reg_no"
-              value="<?= htmlspecialchars($_SESSION['reg_no']) ?>" readonly>
+
+            <?php if ($_SESSION["role"] == "Admin") {
+                // Get currently selected registration number (from POST if form submitted, otherwise empty or session)
+                $selectedReg = isset($_POST['reg_no']) ? $_POST['reg_no'] : (isset($_SESSION['reg_no']) ? $_SESSION['reg_no'] : '');
+
+                // Query all users. We select all columns so we can try to show a name if present.
+                $users = $connection->query("SELECT * FROM user_registered_info ORDER BY RegistrationNo");
+
+                if (!$users) {
+                    // Query failed (table might not exist or permission issue)
+                    // Show a disabled select with the DB error for debugging (you can remove error message later)
+                    ?>
+                    <select class="form-select" disabled>
+                        <option>No users found (DB error)</option>
+                    </select>
+                    <div class="small text-danger mt-1">DB error: <?= htmlspecialchars($connection->error) ?></div>
+                    <?php
+                } elseif ($users->num_rows === 0) {
+                    // No users in table
+                    ?>
+                    <select class="form-select" disabled>
+                        <option value="">-- No registered users --</option>
+                    </select>
+                    <?php
+                } else {
+                    // Render select with the users
+                    ?>
+                    <select name="reg_no" class="form-select" required>
+                        <option value="">-- Select User --</option>
+                        <?php
+                        while ($row = $users->fetch_assoc()) {
+                            // find a readable name column among common possibilities
+                            $displayName = '';
+                            if (isset($row['first_name']) && $row['first_name'] !== '') $displayName = $row['first_name'];
+                            elseif (isset($row['FirstName']) && $row['FirstName'] !== '') $displayName = $row['FirstName'];
+                            elseif (isset($row['name']) && $row['name'] !== '') $displayName = $row['name'];
+                            elseif (isset($row['full_name']) && $row['full_name'] !== '') $displayName = $row['full_name'];
+                            elseif (isset($row['Username']) && $row['Username'] !== '') $displayName = $row['Username'];
+                            // fallback: empty
+                            $regVal = isset($row['RegistrationNo']) ? $row['RegistrationNo'] : '';
+
+                            // mark selected if matches
+                            $isSelected = ($regVal !== '' && $regVal == $selectedReg) ? 'selected' : '';
+                            ?>
+                            <option value="<?= htmlspecialchars($regVal) ?>" <?= $isSelected ?>>
+                                <?= htmlspecialchars($regVal) ?><?= $displayName ? ' - '.htmlspecialchars($displayName) : '' ?>
+                            </option>
+                        <?php } ?>
+                    </select>
+                    <?php
+                }
+            } else { ?>
+                <!-- Normal user sees only his own Reg No -->
+                <input type="text"
+                       name="reg_no"
+                       value="<?= htmlspecialchars($_SESSION['reg_no']) ?>"
+                       readonly>
+            <?php } ?>
           </div>
 
           <div class="input_box">
             <label>Book ID</label>
-            <input type="text" name="book_id" required>
+            <input type="text" name="book_id" required value="<?= isset($_POST['book_id']) ? htmlspecialchars($_POST['book_id']) : '' ?>">
           </div>
 
           <div class="input_box">
